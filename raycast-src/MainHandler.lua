@@ -1,114 +1,86 @@
-local HitboxesConfigured = 0
-local ActiveHitboxes = {}
-local Handler = {}
-
-local HeartbeatConnection
+-- [[ Services ]]
 local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
 
+-- [[ Constants ]]
+local SYNC_RATE = RunService.Heartbeat
+local MAIN = script.Parent
+
+-- [[ Variables ]
+local ActiveHitboxes = {}
+local Handler = {}
+local clock = os.clock
+
+
 --------
-
-local CastAttachment = require(script.Parent.CastLogics.CastAttachment)
-local CastVectorPoint = require(script.Parent.CastLogics.CastVectorPoint)
-local CastLinkAttachment = require(script.Parent.CastLogics.CastLinkAttachment)
-
-local Service_Stop = function(forceStop)
-	if HitboxesConfigured <= 0 or forceStop then
-		HeartbeatConnection:Disconnect()
-		HeartbeatConnection = nil
-	end
-end
-
-local Service_Run = function()
-	if HeartbeatConnection then return end	
-	
-	HeartbeatConnection = RunService.Heartbeat:Connect(function()
-		local IsActive = false
-		for Index, Object in pairs(ActiveHitboxes) do
-			if Object.deleted then
-				Handler:remove(Index)
-				return
-			end
-			if Object.active then
-				IsActive = true
-				for _, Point in ipairs(Object.points) do
-					local rayStart
-					local rayDir
-					local RelativePointToWorld 
-					local method
-					if Point.RelativePart then
-						method = CastVectorPoint
-						rayStart, rayDir, RelativePointToWorld = method:solve(Point, Object.debugMode)
-					elseif Point.Attachment0 == nil and typeof(Point.Attachment) == "Instance" then
-						method = CastAttachment
-						rayStart, rayDir = method:solve(Point, Object.debugMode)
-					elseif Point.Attachment0 then
-						method = CastLinkAttachment
-						rayStart, rayDir = method:solve(Point, Object.debugMode)
-					end
-					
-					if rayStart then
-						local raycastResult = workspace:Raycast(rayStart, rayDir, Object.raycastParams)
-						method:lastPosition(Point, RelativePointToWorld)
-						
-						if raycastResult then
-							local hitPart = raycastResult.Instance
-							if not Object.partMode then
-								local Target = hitPart.Parent
-								if Target and not Object.targetsHit[Target] then
-									local Humanoid = Target:FindFirstChildOfClass("Humanoid")
-									if Humanoid then
-										Object.targetsHit[Target] = true
-										Object.bindable:Fire(hitPart, Humanoid, raycastResult)
-									end
-								end
-							else
-								if not Object.targetsHit[hitPart] then
-									Object.targetsHit[hitPart] = true
-									Object.bindable:Fire(hitPart, nil, raycastResult)
-								end
-							end
-						end
-					end
-				end
-			end
-		end
-		if not IsActive then
-			--- If all hitbox rays are stopped, no need to continue the heartbeat
-			
-			Service_Stop(true)
-		end
-	end)
-end
-
-CollectionService:GetInstanceAddedSignal("RaycastEnabled"):Connect(function()
-	Service_Run()
-end)
-
 function Handler:add(hitboxObject)
 	assert(typeof(hitboxObject) ~= "Instance", "Make sure you are initializing from the Raycast module, not from this handler.")
-	
-	HitboxesConfigured = HitboxesConfigured + 1
-	ActiveHitboxes[hitboxObject.object] = hitboxObject
+	table.insert(ActiveHitboxes, hitboxObject)
 end
 
 function Handler:remove(object)
-	if ActiveHitboxes[object] then
-		HitboxesConfigured = HitboxesConfigured - 1
-		ActiveHitboxes[object]:cleanup()
-		setmetatable(ActiveHitboxes[object], nil)
-		ActiveHitboxes[object] = nil
-		Service_Stop()
+	for i in ipairs(ActiveHitboxes) do
+		if ActiveHitboxes[i].object == object then
+			ActiveHitboxes[i]:Destroy()
+			setmetatable(ActiveHitboxes[i], nil)
+			table.remove(ActiveHitboxes, i)
+		end
 	end
 end
 
-function Handler:check(object, canWarn)
-	if ActiveHitboxes[object] then
-		if canWarn then
-			warn("This hitbox already exists!")
+function Handler:check(object)
+	for _, hitbox in ipairs(ActiveHitboxes) do
+		if hitbox.object == object then
+			return hitbox
 		end
-		return ActiveHitboxes[object]
 	end
 end
+
+function OnTagRemoved(object)
+	Handler:remove(object)
+end
+
+CollectionService:GetInstanceRemovedSignal("RaycastModuleManaged"):Connect(OnTagRemoved)
+
+
+--------
+SYNC_RATE:Connect(function()
+	for Index, Object in ipairs(ActiveHitboxes) do
+		if Object.deleted then
+			Handler:remove(Object.object)
+		else
+			for _, Point in ipairs(Object.points) do
+				if not Object.active then
+					Point.LastPosition = nil
+				else
+					local rayStart, rayDir, RelativePointToWorld = Point.solver:solve(Point, Object.debugMode)
+					local raycastResult = workspace:Raycast(rayStart, rayDir, Object.raycastParams)
+					Point.solver:lastPosition(Point, RelativePointToWorld)
+
+					if raycastResult then
+						local hitPart = raycastResult.Instance
+						local findModel = not Object.partMode and hitPart:FindFirstAncestorOfClass("Model")
+						local humanoid = findModel and findModel:FindFirstChildOfClass("Humanoid")
+						local target = humanoid or (Object.partMode and hitPart)
+
+						if target and not Object.targetsHit[target] then
+							Object.targetsHit[target] = true
+							Object.OnHit:Fire(hitPart, humanoid, raycastResult, Point.group)
+						end
+					end
+					
+					if Object.endTime > 0 then
+						if Object.endTime <= clock() then
+							Object.endTime = 0
+							Object:HitStop()
+						end
+					end
+					
+					Object.OnUpdate:Fire(Point.LastPosition)
+				end
+			end
+		end
+	end
+end)
 
 return Handler

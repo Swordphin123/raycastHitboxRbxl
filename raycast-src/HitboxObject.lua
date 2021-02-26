@@ -1,11 +1,20 @@
-local HitboxObject = {}
-local CollectionTag = "RaycastEnabled"
-
---------
-
+-- [[ Services ]]
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
+-- [[ Variables ]]
+local MAIN = script.Parent
+
+local CastAttachment  = require(MAIN.CastLogics.CastAttachment)
+local CastVectorPoint = require(MAIN.CastLogics.CastVectorPoint)
+local CastLinkAttach  = require(MAIN.CastLogics.CastLinkAttachment)
+
+local Signal = require(MAIN.Tools.Signal)
+local clock = os.clock
+
+
+--------
+local HitboxObject = {}
 local Hitbox = {}
 Hitbox.__index = Hitbox
 
@@ -24,25 +33,29 @@ function Hitbox:config(object, ignoreList)
 	self.debugMode = false
 	self.points = {}
 	self.targetsHit = {}
-	self.bindable = Instance.new("BindableEvent")
-	self.OnHit = self.bindable.Event
+	self.endTime = 0
+	self.OnHit = Signal:Create()
+	self.OnUpdate = Signal:Create()
 	self.raycastParams = RaycastParams.new()
 	self.raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
 	self.raycastParams.FilterDescendantsInstances = ignoreList or {}
 	
 	self.object = object
-	self.object.AncestryChanged:Connect(function()
-		if not workspace:IsAncestorOf(self.object) and not Players:IsAncestorOf(self.object) then
-			self:cleanup()
-		end
-	end)
+	CollectionService:AddTag(self.object, "RaycastModuleManaged")
 end
 
-function Hitbox:SetPoints(object, vectorPoints)
-	if object and object:IsA("BasePart") then
+function Hitbox:SetPoints(object, vectorPoints, groupName)
+	if object and (object:IsA("BasePart") or object:IsA("MeshPart") or object:IsA("Attachment")) then
 		for _, vectors in ipairs(vectorPoints) do
 			if typeof(vectors) == "Vector3" then
-				local Point = {RelativePart = object, Attachment = vectors, LastPosition = nil}
+				local Point = {
+					IsAttachment = object:IsA("Attachment"),
+					RelativePart = object, 
+					Attachment = vectors,
+					LastPosition = nil,
+					group = groupName,
+					solver = CastVectorPoint
+				}
 				table.insert(self.points, Point)
 			end
 		end
@@ -51,7 +64,7 @@ end
 
 function Hitbox:RemovePoints(object, vectorPoints)
 	if object then
-		if object:IsA("BasePart") or object:IsA("MeshPart") then
+		if object:IsA("BasePart") or object:IsA("MeshPart") then --- for some reason it doesn't recognize meshparts unless I add it in
 			for i = 1, #self.points do
 				local Point = self.points[i]
 				for _, vectors in ipairs(vectorPoints) do
@@ -66,11 +79,14 @@ end
 
 function Hitbox:LinkAttachments(primaryAttachment, secondaryAttachment)
 	if primaryAttachment:IsA("Attachment") and secondaryAttachment:IsA("Attachment") then
+		local group = primaryAttachment:FindFirstChild("Group")
 		local Point = {
 			RelativePart = nil,
 			Attachment = primaryAttachment,
 			Attachment0 = secondaryAttachment,
-			LastPosition = nil
+			LastPosition = nil,
+			group = group and group.Value,
+			solver = CastLinkAttach
 		}
 		table.insert(self.points, Point)
 	end
@@ -91,43 +107,63 @@ function Hitbox:seekAttachments(attachmentName, canWarn)
 	end
 	for _, attachment in ipairs(self.object:GetDescendants()) do
 		if attachment:IsA("Attachment") and attachment.Name == attachmentName then
-			local Point = {Attachment = attachment, RelativePart = nil, LastPosition = nil}
+			local group = attachment:FindFirstChild("Group")
+			local Point = {
+				Attachment = attachment, 
+				RelativePart = nil, 
+				LastPosition = nil, 
+				group = group and group.Value,
+				solver = CastAttachment
+			}
 			table.insert(self.points, Point)
 		end
 	end
 	
 	if canWarn then
 		if #self.points <= 0 then
-			warn(string.format("\n[[RAYCAST WARNING]]\nNo attachments with the name '%s' were found in %s. No raycasts will be drawn. Can be ignored if you are using SetPoints.", attachmentName, self.object.Name))
+			warn(string.format("\n[[RAYCAST WARNING]]\nNo attachments with the name '%s' were found in %s. No raycasts will be drawn. Can be ignored if you are using SetPoints.",
+				attachmentName, self.object.Name)
+			)
 		else
-			print(string.format("\n[[RAYCAST MESSAGE]]\n\nCreated Hitbox for %s - Attachments found: %s", self.object.Name, #self.points))
+			print(string.format("\n[[RAYCAST MESSAGE]]\n\nCreated Hitbox for %s - Attachments found: %s", 
+				self.object.Name, #self.points)
+			)
 		end
 	end
 end
 
-function Hitbox:cleanup()
+function Hitbox:Destroy()
 	if self.deleted then return end
+	if self.OnHit then self.OnHit:Delete() end
+	if self.OnUpdate then self.OnUpdate:Delete() end
 	
-	CollectionService:RemoveTag(self.object, CollectionTag)
-	self.bindable:Destroy()
-	self.OnHit = nil
 	self.points = nil
 	self.active = false
 	self.deleted = true
 end
 
-function Hitbox:HitStart()
-	CollectionService:AddTag(self.object, CollectionTag)
+function Hitbox:HitStart(seconds)
 	self.active = true
+	
+	if seconds then
+		assert(type(seconds) == "number", "Argument #1 must be a number!")
+		
+		local minSeconds = 1 / 60 --- Seconds cannot be under 1/60th
+		
+		if seconds <= minSeconds or seconds == math.huge then
+			seconds = minSeconds
+		end
+		
+		self.endTime = clock() + seconds
+	end
 end
 
 function Hitbox:HitStop()
-	CollectionService:RemoveTag(self.object, CollectionTag)
-	for _, Point in ipairs(self.points) do
-		Point.LastPosition = nil
-	end
-	self.targetsHit = {}
+	if self.deleted then return end
+	
 	self.active = false
+	self.endTime = 0
+	table.clear(self.targetsHit)
 end
 
 function Hitbox:PartMode(bool)
